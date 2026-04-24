@@ -1,13 +1,13 @@
-from langgraph.graph import StateGraph, END
+import asyncio
 from typing import TypedDict, List
+import os
 from dotenv import load_dotenv
 
-from langchain_core.messages import HumanMessage, AIMessage
+from mcp.client.stdio import stdio_client, StdioServerParameters
+from mcp.client.session import ClientSession
 from langchain_anthropic import ChatAnthropic
-
-from mcp.client import MCPClient
-
-
+from langchain_core.messages import AIMessage
+from langgraph.graph import StateGraph, END
 
 load_dotenv()
 
@@ -16,49 +16,74 @@ class AgentState(TypedDict):
     messages: List
 
 
-# Connect to MCP server (via stdio)
-mcp_client = MCPClient(
-    mode="stdio",
-    command="python",
-    args=["mcp_server.py"]
-)
+async def setup_agent():
 
-tools = mcp_client.get_tools()
+    # MCP server parameters
+    server_params = StdioServerParameters(
+        command="python",
+        args=["mcp_server.py"]
+    )
 
-llm = ChatAnthropic(
-    model="claude-3-5-sonnet-20241022",
-    temperature=0
-).bind_tools(tools)
+    # Start MCP server via stdio
+    async with stdio_client(server_params) as (read_stream, write_stream):
+
+        # Create MCP session with read/write streams
+        session = ClientSession(read_stream, write_stream)
+        await session.initialize()
+
+        # Fetch MCP tools
+        tools = await session.list_tools()
+
+        # Initialize LLM
+        llm = ChatAnthropic(
+            model="claude-3-5-sonnet-20241022",
+            temperature=0,
+            api_key=os.getenv("API_KEY"),
+            client_options={
+                "base_url": os.getenv("API_URL"),
+            }
+        ).bind_tools(tools)
+
+        return llm, session
 
 
+# Run async initialization
+llm, session = asyncio.run(setup_agent())
+
+
+# ---------- LangGraph Nodes ----------
 def agent_node(state: AgentState):
+    # Invoke LLM with the current conversation state
     response = llm.invoke(state["messages"])
     return {"messages": state["messages"] + [response]}
 
 
 def tool_node(state: AgentState):
+    # Extract the last tool call request from the LLM
     last = state["messages"][-1]
     tool_call = last.tool_calls[0]
 
-    result = mcp_client.call_tool(
+    # Execute the MCP tool (sync wrapper for async call)
+    result = asyncio.run(session.call_tool(
         tool_call["name"],
         tool_call["args"]
-    )
+    ))
 
+    # Return tool result as an AIMessage
     return {
-        "messages": state["messages"] + [
-            AIMessage(content=str(result))
-        ]
+        "messages": state["messages"] + [AIMessage(content=str(result))]
     }
 
 
 def route(state: AgentState):
+    # Decide whether to route to tool or end the graph
     last = state["messages"][-1]
     if hasattr(last, "tool_calls") and last.tool_calls:
         return "tool"
     return END
 
 
+# ---------- Build LangGraph ----------
 builder = StateGraph(AgentState)
 
 builder.add_node("agent", agent_node)

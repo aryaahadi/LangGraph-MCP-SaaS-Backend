@@ -1,5 +1,5 @@
 from langchain_core.messages import HumanMessage
-from agent.graph import graph
+from graph import graph
 
 def run():
 
