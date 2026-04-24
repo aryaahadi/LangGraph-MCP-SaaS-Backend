@@ -1,0 +1,12 @@
+langgraph
+langchain
+langchain-anthropic
+anthropic
+mcp
+pydantic
+fastapi
+uvicorn
+langchain-openai
+openai
+openai-agents
+python-dotenv
